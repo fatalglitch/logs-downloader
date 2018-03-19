@@ -1,0 +1,5 @@
+M2Crypto
+ConfigParser
+loggerglue
+paramiko
+pycrypto

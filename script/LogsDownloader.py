@@ -137,7 +137,7 @@ class LogsDownloader:
                         self.logs_file_index.download()
                         # scan it and download all of the files in it
                         self.first_time_scan()
-                    except Exception, e:
+                    except Exception as e:
                         self.logger.error("Failed to downloading index file and starting to download all the log files in it - %s, %s", e.message, traceback.format_exc())
                         # wait for 5 seconds between each iteration
                         self.logger.info("Sleeping for 5 seconds before trying to fetch logs again...")
@@ -160,7 +160,7 @@ class LogsDownloader:
                     # we failed to handle the next log file
                     else:
                         self.logger.info("Could not get log file %s. It could be that the log file does not exist yet.", next_file)
-                except Exception, e:
+                except Exception as e:
                         self.logger.error("Failed to download file %s. Error is - %s , %s", next_file, e.message, traceback.format_exc())
             if self.running:
                 # wait for 5 seconds between each iteration
@@ -210,7 +210,7 @@ class LogsDownloader:
                         return True
                     # if an exception occurs during the decryption or handling the decrypted content,
                     # we save the raw file to a "fail" folder
-                    except Exception, e:
+                    except Exception as e:
                         self.logger.info("Saving file %s locally to the 'fail' folder %s %s", logfile, e.message, traceback.format_exc())
                         fail_dir = os.path.join(self.config.PROCESS_DIR, 'fail')
                         if not os.path.exists(fail_dir):
@@ -275,9 +275,9 @@ class LogsDownloader:
         # Need to add up/down check of some sort, but random load balance for now if more than 1 server @ config file
         SYSLOG_SERVERS = [e.strip() for e in self.config.SYSLOG_ADDRESS.split(',')]
         if self.config.SYSLOG_ENABLE == 'YES':
-	    choosen_server = random.choice(SYSLOG_SERVERS)
-	    emit = loggerglue.emitter.TCPSyslogEmitter((choosen_server, int(self.config.SYSLOG_PORT)))
-	    self.logger.info("Randomized server: %s" % choosen_server)
+            choosen_server = random.choice(SYSLOG_SERVERS)
+            emit = loggerglue.emitter.TCPSyslogEmitter((choosen_server, int(self.config.SYSLOG_PORT)))
+            self.logger.info("Randomized server: %s" % choosen_server)
             for msg in decrypted_file.splitlines():
                 if msg != '':
                     emit.emit(msg)
@@ -302,8 +302,8 @@ class LogsDownloader:
         file_encryption_key = file_header_content.find("key:")
         if file_encryption_key == -1:
             # uncompress the log content
-	    self.logger.info("Skipping decryption and decompression on %s", filename)
-	    uncompressed_and_decrypted_file_content = file_log_content
+            self.logger.info("Skipping decryption and decompression on %s", filename)
+            uncompressed_and_decrypted_file_content = file_log_content
             # uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
         # if the file is encrypted
         else:
@@ -333,7 +333,7 @@ class LogsDownloader:
                 if not content_is_valid:
                     self.logger.error("Checksum verification failed for file %s", filename)
                     raise Exception("Checksum verification failed")
-            except Exception, e:
+            except Exception as e:
                 self.logger.error("Error while trying to decrypt the file %s", filename, e.message, traceback.format_exc())
                 raise Exception("Error while trying to decrypt the file" + filename)
         return uncompressed_and_decrypted_file_content
@@ -617,7 +617,7 @@ class FileDownloader:
             # return the content string
             return response_content
         # if we got a 401 or 404 responses
-        except requests.HTTPError, e:
+        except requests.HTTPError as e:
             if e.status_code == 404:
                 self.logger.error("Could not find file %s. Response code is %s", url, e.code)
                 # return response_content
@@ -648,15 +648,15 @@ if __name__ == "__main__":
     try:
         opts, args = getopt.getopt(sys.argv[1:], 'c:l:v:h', ['configpath=', 'logpath=', 'loglevel=', 'help'])
     except getopt.GetoptError:
-        print "Error starting Logs Downloader. The following arguments should be provided:" \
+        print ("Error starting Logs Downloader. The following arguments should be provided:" \
               " \n '-c' - path to the config folder" \
               " \n '-l' - path to the system logs folder" \
               " \n '-v' - LogsDownloader system logs level" \
-              " \n Or no arguments at all in order to use default paths"
+              " \n Or no arguments at all in order to use default paths")
         sys.exit(2)
     for opt, arg in opts:
         if opt in ('-h', '--help'):
-            print 'LogsDownloader.py -c <path_to_config_folder> -l <path_to_system_logs_folder> -v <system_logs_level>'
+            print ('LogsDownloader.py -c <path_to_config_folder> -l <path_to_system_logs_folder> -v <system_logs_level>')
             sys.exit(2)
         elif opt in ('-c', '--configpath'):
             path_to_config_folder = arg
