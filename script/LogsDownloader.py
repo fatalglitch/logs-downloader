@@ -611,7 +611,7 @@ class FileDownloader:
                 response_content = response.content
             # if we got another response code
             else:
-                self.logger.error("Failed to download file %s. Response code is %s. Info is %s", url, response.code, response.info())
+                self.logger.error("Failed to download file %s. Response code is %s. Info is %s", url, response.status_code, response.info())
             # close the response
             response.connection.close()
             # return the content string
@@ -619,7 +619,7 @@ class FileDownloader:
         # if we got a 401 or 404 responses
         except requests.HTTPError as e:
             if e.status_code == 404:
-                self.logger.error("Could not find file %s. Response code is %s", url, e.code)
+                self.logger.error("Could not find file %s. Response code is %s", url, e.status_code)
                 # return response_content
                 # response_content = "404_NOT_FOUND"
                 return "404_NOT_FOUND"
