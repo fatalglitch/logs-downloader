@@ -49,12 +49,23 @@ import traceback
 import urllib2
 import zlib
 from logging import handlers
-
+import random
 import M2Crypto
 import loggerglue
 import loggerglue.emitter
 import loggerglue.logger
 from Crypto.Cipher import AES
+
+import paramiko
+from paramiko.py3compat import input
+import ssl
+import requests
+import urllib3
+
+"""
+Warnings overrides
+"""
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 """
 Main class for downloading log files
@@ -128,9 +139,9 @@ class LogsDownloader:
                         self.first_time_scan()
                     except Exception, e:
                         self.logger.error("Failed to downloading index file and starting to download all the log files in it - %s, %s", e.message, traceback.format_exc())
-                        # wait for 30 seconds between each iteration
-                        self.logger.info("Sleeping for 30 seconds before trying to fetch logs again...")
-                        time.sleep(30)
+                        # wait for 5 seconds between each iteration
+                        self.logger.info("Sleeping for 5 seconds before trying to fetch logs again...")
+                        time.sleep(5)
                         continue
             # the is a last downloaded log file id
             else:
@@ -140,7 +151,7 @@ class LogsDownloader:
                 self.logger.debug("Will now try to download %s", next_file)
                 try:
                     # download and handle the next log file
-                    success = self.handle_file(next_file, wait_time=20)
+                    success = self.handle_file(next_file, wait_time=5)
                     # if we successfully handled the next log file
                     if success:
                         self.logger.debug("Successfully handled file %s, updating the last known downloaded file id", next_file)
@@ -152,9 +163,9 @@ class LogsDownloader:
                 except Exception, e:
                         self.logger.error("Failed to download file %s. Error is - %s , %s", next_file, e.message, traceback.format_exc())
             if self.running:
-                # wait for 30 seconds between each iteration
-                self.logger.info("Sleeping for 30 seconds before trying to fetch logs again...")
-                time.sleep(30)
+                # wait for 5 seconds between each iteration
+                self.logger.info("Sleeping for 5 seconds before trying to fetch logs again...")
+                time.sleep(5)
 
     """
     Scan the logs.index file, and download all the log files in it
@@ -168,7 +179,7 @@ class LogsDownloader:
             if self.running:
                 if LogsFileIndex.validate_log_file_format(str(log_file_name.rstrip('\r\n'))):
                     # download and handle the log file
-                    success = self.handle_file(log_file_name, wait_time=20)
+                    success = self.handle_file(log_file_name, wait_time=5)
                     # if we successfully handled the log file
                     if success:
                         # set the last handled log file information
@@ -181,7 +192,7 @@ class LogsDownloader:
     """
     Download a log file, decrypt, unzip, and store it
     """
-    def handle_file(self, logfile, wait_time=30):
+    def handle_file(self, logfile, wait_time=5):
         # we will try to get the file a max of 3 tries
         counter = 0
         while counter <= 3:
@@ -208,14 +219,48 @@ class LogsDownloader:
                             file.write(result[1])
                         self.logger.info("Saved file %s locally to the 'fail' folder", logfile)
                         break
+                elif result[0] == "404_NOT_FOUND":
+                    self.logger.info("Got 404 on file: %s", logfile)
+                    counter += 1
+                    # insert code to retrieve latest log file from the bucket here in case of 404
+                    base64creds = base64.encodestring('%s:%s' % (self.config.API_ID, self.config.API_KEY)).replace('\n', '')
+                    headers = {"Authorization": "Basic %s" % base64creds}
+
+                    if self.config.USE_PROXY == "YES":
+                        proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
+                        request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, proxies=proxies, verify=False, timeout=20)
+                    else:
+                        request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, verify=False, timeout=20)
+                    data = request.content
+                    request.connection.close()
+                    # self.logger.info("logs index data is: %s", data)
+                    first_logfile = data.split('\n')[0]
+                    self.logger.info("first line/oldest log in bucket: %s", first_logfile)
+                    last_logfile = data.split('\n')[-2]
+                    self.logger.info("last line/newest log in bucket: %s", last_logfile)
+                    if int(re.search('((?<=_)\\d+)(?=\\.)', logfile).group(0)) < int(re.search('((?<=_)\\d+)(?=\\.)', first_logfile).group(0)):
+                        logfile = first_logfile
+                        self.last_known_downloaded_file_id.update_last_log_id(logfile)
+                        self.logger.info("updated log file to: %s", logfile)
+                    elif int(re.search('((?<=_)\\d+)(?=\\.)', logfile).group(0)) > int(re.search('((?<=_)\\d+)(?=\\.)', last_logfile).group(0)):
+                        self.logger.info("true 404 found, waiting a minute, not updating values")
+                        time.sleep(60)
+                    else:
+                        for each_file in data.split('\n')[1:-3]:
+                            if logfile == each_file:
+                                logfile = each_file
+                                self.last_known_downloaded_file_id.update_last_log_id(logfile)
+                                self.logger.info("found the file we stopped at, logfile value is now: %s", logfile)
+                                break
+                    self.logger.info("404 snippet completed")
                 # if the file is not found (could be that it is not generated yet)
                 elif result[0] == "NOT_FOUND" or result[0] == "ERROR":
                     # we increase the retry counter
                     counter += 1
                 # if we want to sleep between retries
-                if wait_time > 0 and counter <= 3:
+                if wait_time > 0 and counter <= 2:
                     if self.running:
-                        self.logger.info("Sleeping for %s seconds until next file download retry number %s out of 3", wait_time, counter)
+                        self.logger.info("Sleeping for %s seconds until next file download retry number %s out of 2", wait_time, counter)
                         time.sleep(wait_time)
             # if the downloader was stopped
             else:
@@ -227,14 +272,21 @@ class LogsDownloader:
     Saves the decrypted file content to a log file in the filesystem
     """
     def handle_log_decrypted_content(self, filename, decrypted_file):
+        # Need to add up/down check of some sort, but random load balance for now if more than 1 server @ config file
+        SYSLOG_SERVERS = [e.strip() for e in self.config.SYSLOG_ADDRESS.split(',')]
         if self.config.SYSLOG_ENABLE == 'YES':
+	    choosen_server = random.choice(SYSLOG_SERVERS)
+	    emit = loggerglue.emitter.TCPSyslogEmitter((choosen_server, int(self.config.SYSLOG_PORT)))
+	    self.logger.info("Randomized server: %s" % choosen_server)
             for msg in decrypted_file.splitlines():
                 if msg != '':
-                    emit = loggerglue.emitter.UDPSyslogEmitter((self.config.SYSLOG_ADDRESS, int(self.config.SYSLOG_PORT)))
                     emit.emit(msg)
         if self.config.SAVE_LOCALLY == "YES":
             local_file = open(self.config.PROCESS_DIR + filename, "a+")
-            local_file.writelines(decrypted_file)
+            local_file.writelines(str(line) for line in decrypted_file)
+        if self.config.SFTP_TRANSFER == "YES":
+            upfile = self.config.PROCESS_DIR + filename
+            sendsftp = self.sftp_upload_file(self.config.SFTP_HOSTNAME,int(self.config.SFTP_PORT),self.config.SFTP_USERNAME,self.config.SFTP_PASSWORD,self.config.SFTP_REMOTEDIR,filename)
 
     """
     Decrypt a file content
@@ -250,7 +302,9 @@ class LogsDownloader:
         file_encryption_key = file_header_content.find("key:")
         if file_encryption_key == -1:
             # uncompress the log content
-            uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
+	    self.logger.info("Skipping decryption and decompression on %s", filename)
+	    uncompressed_and_decrypted_file_content = file_log_content
+            # uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
         # if the file is encrypted
         else:
             content_encrypted_sym_key = file_header_content.split("key:")[1].splitlines()[0]
@@ -294,9 +348,11 @@ class LogsDownloader:
             # download the file
             file_content = self.file_downloader.request_file_content(self.config.BASE_URL + filename)
             # if we received a valid file content
-            if file_content != "":
+            if file_content != "" and file_content != "404_NOT_FOUND":
                 return "OK", file_content
             # if the file was not found
+            elif file_content == "404_NOT_FOUND":
+                return "404_NOT_FOUND", file_content
             else:
                 return "NOT_FOUND", file_content
         except Exception:
@@ -322,6 +378,23 @@ class LogsDownloader:
         if sig == signal.SIGTERM:
             self.running = False
             self.logger.info("Got a termination signal, will now shutdown and exit gracefully")
+
+    def sftp_upload_file(self, hostname, port, username, password, directory, upfile):
+        # paramiko.util.log_to_file('/opt/incapsula/logs/sftp.log')
+        try:
+            t = paramiko.Transport((hostname,port))
+            t.start_client()
+            t.auth_password(username,password)
+            sftp = paramiko.SFTPClient.from_transport(t)
+            sftp.put((self.config.PROCESS_DIR + upfile), (directory + "/" + upfile))
+        except Exception as e:
+            self.logger.error('*** Caught exception: %s: %s' % (e.__class__,e))
+            try:
+                t.close()
+            except:
+                pass
+            return "ERROR"
+
 
 """
 ****************************************************************
@@ -481,6 +554,13 @@ class Config:
             config.SYSLOG_PORT = config_parser.get('SETTINGS', 'SYSLOG_PORT')
             config.USE_CUSTOM_CA_FILE = config_parser.get('SETTINGS', 'USE_CUSTOM_CA_FILE')
             config.CUSTOM_CA_FILE = config_parser.get('SETTINGS', 'CUSTOM_CA_FILE')
+            config.SFTP_TRANSFER = config_parser.get('SETTINGS','SFTP_TRANSFER')
+            config.SFTP_HOSTNAME = config_parser.get('SETTINGS','SFTP_HOSTNAME')
+            config.SFTP_PORT = config_parser.get('SETTINGS','SFTP_PORT')
+            config.SFTP_USERNAME = config_parser.get('SETTINGS','SFTP_USERNAME')
+            config.SFTP_PASSWORD = config_parser.get('SETTINGS','SFTP_PASSWORD')
+            config.SFTP_REMOTEDIR = config_parser.get('SETTINGS','SFTP_REMOTEDIR')
+
             return config
         else:
             self.logger.error("Could Not find configuration file %s", config_file)
@@ -506,47 +586,51 @@ class FileDownloader:
     def request_file_content(self, url, timeout=20):
         # default value
         response_content = ""
-        # if we are using a proxy server - read its configurations
-        if self.config.USE_PROXY == "YES":
-            proxy_dict = {"http": self.config.PROXY_SERVER, "https": self.config.PROXY_SERVER, "ftp": self.config.PROXY_SERVER}
-            proxy = urllib2.ProxyHandler(proxy_dict)
-            opener = urllib2.build_opener(proxy)
-            urllib2.install_opener(opener)
-        # build the request
-        request = urllib2.Request(url)
-        base64string = base64.encodestring("%s:%s" % (self.config.API_ID, self.config.API_KEY)).replace('\n', '')
-        request.add_header("Authorization", "Basic %s" % base64string)
+        base64creds = base64.encodestring('%s:%s' % (self.config.API_ID, self.config.API_KEY)).replace('\n', '')
+        headers = {"Authorization": "Basic %s" % base64creds}
+
         try:
             # open the connection to the URL
             if self.config.USE_CUSTOM_CA_FILE == "YES":
-                response = urllib2.urlopen(request, timeout=timeout, cafile=self.config.CUSTOM_CA_FILE)
+                if self.config.USE_PROXY == "YES":
+                    proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
+                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=20)
+                else:
+                    response = requests.get(url, headers=headers, verify=False)
             else:
-                response = urllib2.urlopen(request, timeout=timeout)
+                if self.config.USE_PROXY == "YES":
+                    proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
+                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=20)
+                else:
+                    response = requests.get(url, headers=headers, verify=False)
+
             # if we got a 200 OK response
-            if response.code == 200:
+            if response.status_code == 200:
                 self.logger.info("Successfully downloaded file from URL %s" % url)
                 # read the response content
-                response_content = response.read()
+                response_content = response.content
             # if we got another response code
             else:
                 self.logger.error("Failed to download file %s. Response code is %s. Info is %s", url, response.code, response.info())
             # close the response
-            response.close()
+            response.connection.close()
             # return the content string
             return response_content
         # if we got a 401 or 404 responses
-        except urllib2.HTTPError, e:
-            if e.code == 404:
+        except requests.HTTPError, e:
+            if e.status_code == 404:
                 self.logger.error("Could not find file %s. Response code is %s", url, e.code)
-                return response_content
-            elif e.code == 401:
-                self.logger.error("Authorization error - Failed to download file %s. Response code is %s", url, e.code)
+                # return response_content
+                # response_content = "404_NOT_FOUND"
+                return "404_NOT_FOUND"
+            elif e.status_code == 401:
+                self.logger.error("Authorization error - Failed to download file %s. Response code is %s", url, e.status_code)
                 raise Exception("Authorization error")
-            elif e.code == 429:
-                self.logger.error("Rate limit exceeded - Failed to download file %s. Response code is %s", url, e.code)
+            elif e.status_code == 429:
+                self.logger.error("Rate limit exceeded - Failed to download file %s. Response code is %s", url, e.status_code)
                 raise Exception("Rate limit error")
             else:
-                self.logger.error("An error has occur while making a open connection to %s. %s", url, str(e.code))
+                self.logger.error("An error has occur while making a open connection to %s. %s", url, str(e.status_code))
                 raise Exception("Connection error")
         # unexpected exception occurred
         except Exception:
