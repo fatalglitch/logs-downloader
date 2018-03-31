@@ -141,8 +141,8 @@ class LogsDownloader:
                     except Exception as e:
                         self.logger.error("Failed to downloading index file and starting to download all the log files in it - %s, %s", e.message, traceback.format_exc())
                         # wait for 5 seconds between each iteration
-                        self.logger.info("Sleeping for 5 seconds before trying to fetch logs again...")
-                        time.sleep(5)
+                        self.logger.info("Sleeping for 3 seconds before trying to fetch logs again...")
+                        time.sleep(3)
                         continue
             # the is a last downloaded log file id
             else:
@@ -152,7 +152,7 @@ class LogsDownloader:
                 self.logger.debug("Will now try to download %s", next_file)
                 try:
                     # download and handle the next log file
-                    success = self.handle_file(next_file, wait_time=5)
+                    success = self.handle_file(next_file, wait_time=3)
                     # if we successfully handled the next log file
                     if success:
                         self.logger.debug("Successfully handled file %s, updating the last known downloaded file id", next_file)
@@ -165,8 +165,8 @@ class LogsDownloader:
                         self.logger.error("Failed to download file %s. Error is - %s , %s", next_file, e.message, traceback.format_exc())
             if self.running:
                 # wait for 5 seconds between each iteration
-                self.logger.info("Sleeping for 5 seconds before trying to fetch logs again...")
-                time.sleep(5)
+                self.logger.info("Sleeping for 3 seconds before trying to fetch logs again...")
+                time.sleep(3)
 
     """
     Scan the logs.index file, and download all the log files in it
@@ -180,7 +180,7 @@ class LogsDownloader:
             if self.running:
                 if LogsFileIndex.validate_log_file_format(str(log_file_name.rstrip('\r\n'))):
                     # download and handle the log file
-                    success = self.handle_file(log_file_name, wait_time=5)
+                    success = self.handle_file(log_file_name, wait_time=3)
                     # if we successfully handled the log file
                     if success:
                         # set the last handled log file information
@@ -193,7 +193,7 @@ class LogsDownloader:
     """
     Download a log file, decrypt, unzip, and store it
     """
-    def handle_file(self, logfile, wait_time=5):
+    def handle_file(self, logfile, wait_time=3):
         # we will try to get the file a max of 3 tries
         counter = 0
         failcount = 0
@@ -213,7 +213,7 @@ class LogsDownloader:
                     # if an exception occurs during the decryption or handling the decrypted content,
                     # we save the raw file to a "fail" folder
                     except Exception as e:
-                        self.logger.info("Saving file %s locally to the 'fail' folder %s %s", logfile, e.message, traceback.format_exc())
+                        self.logger.error("Saving file %s locally to the 'fail' folder %s %s", logfile, e.message, traceback.format_exc())
                         fail_dir = os.path.join(self.config.PROCESS_DIR, 'fail')
                         if not os.path.exists(fail_dir):
                             os.mkdir(fail_dir)
@@ -227,12 +227,18 @@ class LogsDownloader:
                     # insert code to retrieve latest log file from the bucket here in case of 404
                     base64creds = base64.encodestring('%s:%s' % (self.config.API_ID, self.config.API_KEY)).replace('\n', '')
                     headers = {"Authorization": "Basic %s" % base64creds}
-
-                    if self.config.USE_PROXY == "YES":
-                        proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER}
-                        request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, proxies=proxies, verify=False, timeout=20)
+                    if self.config.USE_CUSTOM_CA_FILE == "YES":
+                        if self.config.USE_PROXY == "YES":
+                            proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER}
+                            request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, proxies=proxies, verify=self.config.CUSTOM_CA_FILE, timeout=20)
+                        else:
+                            request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, verify=self.config.CUSTOM_CA_FILE, timeout=20)
                     else:
-                        request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, verify=False, timeout=20)
+                        if self.config.USE_PROXY == "YES":
+                            proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER}
+                            request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, proxies=proxies, verify=False, timeout=20)
+                        else:
+                            request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, verify=False, timeout=20)
                     data = request.content
                     request.connection.close()
                     # self.logger.debug("logs index data is: %s", data)
@@ -247,13 +253,15 @@ class LogsDownloader:
                     elif int(re.search('((?<=_)\\d+)(?=\\.)', logfile).group(0)) > int(re.search('((?<=_)\\d+)(?=\\.)', last_logfile).group(0)):
                         self.logger.info("true 404 found, waiting a minute, not updating values")
                         failcount += 1
-                        if failcount > 1:
-                            self.logger.info("got 404 twice, we're starting over from the index")
+                        if failcount > 3:
+                            self.logger.info("got 404 more than 10 times, we're starting over from the index")
                             logfile = first_logfile
                             self.last_known_downloaded_file_id.update_last_log_id(logfile)
                             self.logger.info("updated log file to: %s", logfile)
+                            #self.logs_file_index.download()
+                            #self.first_time_scan()
                         else:
-                            time.sleep(60)
+                            time.sleep(10)
                     else:
                         for each_file in data.split('\n')[1:-3]:
                             if logfile == each_file:
@@ -261,7 +269,7 @@ class LogsDownloader:
                                 self.last_known_downloaded_file_id.update_last_log_id(logfile)
                                 self.logger.info("found the file we stopped at, logfile value is now: %s", logfile)
                                 break
-                    self.logger.info("404 snippet completed")
+                    self.logger.debug("404 snippet completed")
                 # if the file is not found (could be that it is not generated yet)
                 elif result[0] == "NOT_FOUND" or result[0] == "ERROR":
                     # we increase the retry counter
@@ -316,9 +324,14 @@ class LogsDownloader:
         file_encryption_key = file_header_content.find("key:")
         if file_encryption_key == -1:
             # uncompress the log content
-            self.logger.info("Skipping decryption and decompression on %s", filename)
+            self.logger.debug("%s is not encrypted, Skipping decryption", filename)
             uncompressed_and_decrypted_file_content = file_log_content
-            # uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
+            try:
+                uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
+            except zlib.error:
+                # File is not compressed
+                self.logger.debug("%s is not compressed, skipping decompression", filename)
+                uncompressed_and_decrypted_file_content = file_log_content
         # if the file is encrypted
         else:
             content_encrypted_sym_key = file_header_content.split("key:")[1].splitlines()[0]
@@ -475,9 +488,7 @@ class LastFileId:
     def get_next_file_name(self):
         # get the current stored last known successfully downloaded log file
         curr_log_file_name_arr = self.get_last_log_id().split("_")
-        print "Split resulted in  %s: %s" % (curr_log_file_name_arr[0], curr_log_file_name_arr[1])
         # get the current id
-        print "log file id is: %s" % curr_log_file_name_arr[1].rstrip(".log")
         curr_log_file_id = int(curr_log_file_name_arr[1].rstrip(".log")) + 1
         # build the next log file name
         new_log_file_id = curr_log_file_name_arr[0] + "_" + str(curr_log_file_id) + ".log"
