@@ -258,7 +258,6 @@ class LogsDownloader:
                 elif result[0] == "NOT_FOUND" or result[0] == "ERROR":
                     # we increase the retry counter
                     counter += 1
-                    self.logger.info("Result in handle_file was: %s", result[0])
                 # if we want to sleep between retries
                 if wait_time > 0 and counter <= 2:
                     if self.running:
@@ -354,7 +353,6 @@ class LogsDownloader:
         try:
             # download the file
             file_content = self.file_downloader.request_file_content(self.config.BASE_URL + filename)
-            self.logger.info("File Content in download_log_file is %s", file_content)
             # if we received a valid file content
             if file_content != "" and file_content != "404_NOT_FOUND":
                 return "OK", file_content

@@ -1,2 +1,8 @@
 logs
 scriptlogs
+bin
+include
+lib
+pip-selfcheck.json
+config/Settings.Config
+config/LastKnownDownloadedFileId.txt
