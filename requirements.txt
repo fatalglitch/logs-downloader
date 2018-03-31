@@ -3,3 +3,5 @@ ConfigParser
 loggerglue
 paramiko
 pycrypto
+requests
+gzip

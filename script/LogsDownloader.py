@@ -61,6 +61,7 @@ from paramiko.py3compat import input
 import ssl
 import requests
 import urllib3
+import gzip
 
 """
 Warnings overrides
@@ -93,11 +94,11 @@ class LogsDownloader:
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
-        if log_level == "DEBUG":
+        if log_level.upper() == "DEBUG":
             self.logger.setLevel(logging.DEBUG)
-        elif log_level == "INFO":
+        elif log_level.upper() == "INFO":
             self.logger.setLevel(logging.INFO)
-        elif log_level == "ERROR":
+        elif log_level.upper() == "ERROR":
             self.logger.setLevel(logging.ERROR)
         self.logger.debug("Initializing LogsDownloader")
         self.config_path = config_path
@@ -257,6 +258,7 @@ class LogsDownloader:
                 elif result[0] == "NOT_FOUND" or result[0] == "ERROR":
                     # we increase the retry counter
                     counter += 1
+                    self.logger.info("Result in handle_file was: %s", result[0])
                 # if we want to sleep between retries
                 if wait_time > 0 and counter <= 2:
                     if self.running:
@@ -287,6 +289,11 @@ class LogsDownloader:
         if self.config.SFTP_TRANSFER == "YES":
             upfile = self.config.PROCESS_DIR + filename
             sendsftp = self.sftp_upload_file(self.config.SFTP_HOSTNAME,int(self.config.SFTP_PORT),self.config.SFTP_USERNAME,self.config.SFTP_PASSWORD,self.config.SFTP_REMOTEDIR,filename)
+            # Compress the file after sent to SFTP server
+            self.gzip_file(self.upfile)
+        if self.config.SFTP_TRANSFER == "NO":
+            tmpfile = self.config.PROCESS_DIR + filename
+            self.gzip_file(tmpfile)
 
     """
     Decrypt a file content
@@ -347,6 +354,7 @@ class LogsDownloader:
         try:
             # download the file
             file_content = self.file_downloader.request_file_content(self.config.BASE_URL + filename)
+            self.logger.info("File Content in download_log_file is %s", file_content)
             # if we received a valid file content
             if file_content != "" and file_content != "404_NOT_FOUND":
                 return "OK", file_content
@@ -378,6 +386,9 @@ class LogsDownloader:
         if sig == signal.SIGTERM:
             self.running = False
             self.logger.info("Got a termination signal, will now shutdown and exit gracefully")
+        if sig == signal.SIGINT:
+            self.running = False
+            self.logger.info("Got a interrupt signal, will now shutdown and exit gracefully")
 
     def sftp_upload_file(self, hostname, port, username, password, directory, upfile):
         # paramiko.util.log_to_file('/opt/incapsula/logs/sftp.log')
@@ -394,6 +405,19 @@ class LogsDownloader:
             except:
                 pass
             return "ERROR"
+
+    def gzip_file(self,infile):
+        try:
+            in_data = open(infile, "rb").read()
+            out_gz = infile + ".gz"
+            gzf = gzip.open(out_gz, "wb")
+            gzf.write(in_data)
+            gzf.close()
+            os.unlink(infile)
+        except Exception as e:
+            self.logger.error('*** Caught Exception: %s: %s' % (e.__class__,e))
+            return "ERROR"
+
 
 
 """
@@ -609,13 +633,23 @@ class FileDownloader:
                 self.logger.info("Successfully downloaded file from URL %s" % url)
                 # read the response content
                 response_content = response.content
+                response.connection.close()
+                return response_content
+            # if we got a 404 response
+            if response.status_code == 404:
+                self.logger.info("Failed to download file from URL %s, response was %s", url, response.status_code)
+                response.connection.close()
+                # read the response content
+                return "404_NOT_FOUND"
             # if we got another response code
             else:
-                self.logger.error("Failed to download file %s. Response code is %s. Info is %s", url, response.status_code, response.info())
+                self.logger.info("Failed to download file %s. Response code was %s.", url, response.status_code)
+                self.logger.debug("Content of Response was: %s", response.content)
+                response.connection.close()
             # close the response
-            response.connection.close()
+            #response.connection.close()
             # return the content string
-            return response_content
+            # return response_content
         # if we got a 401 or 404 responses
         except requests.HTTPError as e:
             if e.status_code == 404:
@@ -670,6 +704,7 @@ if __name__ == "__main__":
     logsDownloader = LogsDownloader(path_to_config_folder, path_to_system_logs_folder, system_logs_level)
     # set a handler for process termination
     signal.signal(signal.SIGTERM, logsDownloader.set_signal_handling)
+    signal.signal(signal.SIGINT, logsDownloader.set_signal_handling)
     try:
         # start a dedicated thread that will run the LogsDownloader logs fetching logic
         process_thread = threading.Thread(target=logsDownloader.get_log_files, name="process_thread")
