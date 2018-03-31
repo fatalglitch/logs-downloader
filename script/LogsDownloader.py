@@ -196,6 +196,7 @@ class LogsDownloader:
     def handle_file(self, logfile, wait_time=5):
         # we will try to get the file a max of 3 tries
         counter = 0
+        failcount = 0
         while counter <= 3:
             if self.running:
                 # download the file
@@ -228,13 +229,13 @@ class LogsDownloader:
                     headers = {"Authorization": "Basic %s" % base64creds}
 
                     if self.config.USE_PROXY == "YES":
-                        proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
+                        proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER}
                         request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, proxies=proxies, verify=False, timeout=20)
                     else:
                         request = requests.get((self.config.BASE_URL + "/logs.index"), headers=headers, verify=False, timeout=20)
                     data = request.content
                     request.connection.close()
-                    # self.logger.info("logs index data is: %s", data)
+                    # self.logger.debug("logs index data is: %s", data)
                     first_logfile = data.split('\n')[0]
                     self.logger.info("first line/oldest log in bucket: %s", first_logfile)
                     last_logfile = data.split('\n')[-2]
@@ -245,7 +246,14 @@ class LogsDownloader:
                         self.logger.info("updated log file to: %s", logfile)
                     elif int(re.search('((?<=_)\\d+)(?=\\.)', logfile).group(0)) > int(re.search('((?<=_)\\d+)(?=\\.)', last_logfile).group(0)):
                         self.logger.info("true 404 found, waiting a minute, not updating values")
-                        time.sleep(60)
+                        failcount += 1
+                        if failcount > 1:
+                            self.logger.info("got 404 twice, we're starting over from the index")
+                            logfile = first_logfile
+                            self.last_known_downloaded_file_id.update_last_log_id(logfile)
+                            self.logger.info("updated log file to: %s", logfile)
+                        else:
+                            time.sleep(60)
                     else:
                         for each_file in data.split('\n')[1:-3]:
                             if logfile == each_file:
@@ -445,7 +453,8 @@ class LastFileId:
         # if the file exists - get the log file id from it
         if os.path.exists(index_file_path):
             with open(index_file_path, "r+") as index_file:
-                return index_file.read()
+                tmpfil = index_file.read()
+                return tmpfil.rstrip()
         # return an empty string if no file exists
         return ''
 
@@ -466,7 +475,9 @@ class LastFileId:
     def get_next_file_name(self):
         # get the current stored last known successfully downloaded log file
         curr_log_file_name_arr = self.get_last_log_id().split("_")
+        print "Split resulted in  %s: %s" % (curr_log_file_name_arr[0], curr_log_file_name_arr[1])
         # get the current id
+        print "log file id is: %s" % curr_log_file_name_arr[1].rstrip(".log")
         curr_log_file_id = int(curr_log_file_name_arr[1].rstrip(".log")) + 1
         # build the next log file name
         new_log_file_id = curr_log_file_name_arr[0] + "_" + str(curr_log_file_id) + ".log"
@@ -608,6 +619,8 @@ class FileDownloader:
     def request_file_content(self, url, timeout=20):
         # default value
         response_content = ""
+        if self.config.USE_PROXY == "YES":
+            proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
         base64creds = base64.encodestring('%s:%s' % (self.config.API_ID, self.config.API_KEY)).replace('\n', '')
         headers = {"Authorization": "Basic %s" % base64creds}
 
@@ -615,17 +628,17 @@ class FileDownloader:
             # open the connection to the URL
             if self.config.USE_CUSTOM_CA_FILE == "YES":
                 if self.config.USE_PROXY == "YES":
-                    proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
-                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=20)
+                    response = requests.get(url, headers=headers, proxies=proxies, verify=self.config.CUSTOM_CA_FILE, timeout=timeout)
                 else:
-                    response = requests.get(url, headers=headers, verify=False)
+                    response = requests.get(url, headers=headers, verify=self.config.CUSTOM_CA_FILE, timeout=timeout)
             else:
                 if self.config.USE_PROXY == "YES":
-                    proxies = {'http': self.config.PROXY_SERVER, 'https': self.config.PROXY_SERVER,}
-                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=20)
+                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=timeout)
                 else:
-                    response = requests.get(url, headers=headers, verify=False)
+                    response = requests.get(url, headers=headers, verify=False, timeout=timeout)
 
+            # raise status for any exceptions
+            response.raise_for_status()
             # if we got a 200 OK response
             if response.status_code == 200:
                 self.logger.info("Successfully downloaded file from URL %s" % url)
@@ -633,36 +646,26 @@ class FileDownloader:
                 response_content = response.content
                 response.connection.close()
                 return response_content
-            # if we got a 404 response
-            if response.status_code == 404:
-                self.logger.info("Failed to download file from URL %s, response was %s", url, response.status_code)
-                response.connection.close()
-                # read the response content
-                return "404_NOT_FOUND"
             # if we got another response code
             else:
                 self.logger.info("Failed to download file %s. Response code was %s.", url, response.status_code)
                 self.logger.debug("Content of Response was: %s", response.content)
                 response.connection.close()
-            # close the response
-            #response.connection.close()
-            # return the content string
-            # return response_content
         # if we got a 401 or 404 responses
         except requests.HTTPError as e:
-            if e.status_code == 404:
-                self.logger.error("Could not find file %s. Response code is %s", url, e.status_code)
+            if e.response.status_code == 404:
+                self.logger.error("Could not find file %s. Response code is %s", url, e.response.status_code)
                 # return response_content
                 # response_content = "404_NOT_FOUND"
                 return "404_NOT_FOUND"
-            elif e.status_code == 401:
-                self.logger.error("Authorization error - Failed to download file %s. Response code is %s", url, e.status_code)
+            elif e.response.status_code == 401:
+                self.logger.error("Authorization error - Failed to download file %s. Response code is %s", url, e.response.status_code)
                 raise Exception("Authorization error")
-            elif e.status_code == 429:
-                self.logger.error("Rate limit exceeded - Failed to download file %s. Response code is %s", url, e.status_code)
+            elif e.response.status_code == 429:
+                self.logger.error("Rate limit exceeded - Failed to download file %s. Response code is %s", url, e.response.status_code)
                 raise Exception("Rate limit error")
             else:
-                self.logger.error("An error has occur while making a open connection to %s. %s", url, str(e.status_code))
+                self.logger.error("An error has occur while making a open connection to %s. %s", url, str(e.response.status_code))
                 raise Exception("Connection error")
         # unexpected exception occurred
         except Exception:
